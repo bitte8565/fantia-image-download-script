@@ -43,6 +43,10 @@ download_root_dir_path: Path = Path(fantia_config['download_root_dir'])
 download_root_dir: Path = download_root_dir_path if download_root_dir_path.is_absolute(
 ) else (script_file_path.parent / download_root_dir_path).absolute()
 
+UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_5) ' \
+     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36 '
+HEADERS = {'User-Agent': UA}
+
 
 def get_attr_value_by_name(attrs: List[tuple], attr_name: str) -> str:
     attr = tuple(filter(lambda attr: attr[0] == attr_name, attrs))
@@ -70,22 +74,25 @@ class FantiaFanClubsParser(HTMLParser):
         self.close()
 
     def handle_starttag(self, tag, attrs):
-        self.page_link = False
+        try:
+            self.page_link = False
 
-        if tag == 'a':
-            for attr in attrs:
-                if attr[0] != 'class':
-                    continue
+            if tag == 'a':
+                for attr in attrs:
+                    if attr[0] != 'class':
+                        continue
 
-                if attr[1] == 'link-block':
-                    self.posts_urls.append(
-                        get_attr_value_by_name(attrs, 'href'))
-                    break
-                elif attr[1] == 'page-link':
-                    page_link_url = get_attr_value_by_name(attrs, 'href')
-                    if page_link_url:
-                        self.max_page_number = int(page_link_url.split('=')[1])
+                    if attr[1] == 'link-block':
+                        self.posts_urls.append(
+                            get_attr_value_by_name(attrs, 'href'))
                         break
+                    elif attr[1] == 'page-link':
+                        page_link_url = get_attr_value_by_name(attrs, 'href')
+                        if page_link_url:
+                            self.max_page_number = int(page_link_url.split('=')[1])
+                            break
+        except Exception:
+            pass
 
 
 class FantiaPostsParser:
@@ -156,12 +163,12 @@ class FantiaOriginalUriParser(HTMLParser):
 def original_url_parse(download_dir_name: str, original_uri: str) -> None:
     download_interval()
     original_uri_response = requests.get(
-        urljoin(FANTIA_URL_PREFIX, original_uri), cookies=cookies)
+        urljoin(FANTIA_URL_PREFIX, original_uri), cookies=cookies, headers=HEADERS)
 
     with FantiaOriginalUriParser() as original_uri_parser:
         original_uri_parser.feed(original_uri_response.text)
         original_uri_response = requests.get(
-            original_uri_parser.src, cookies=cookies)
+            original_uri_parser.src, cookies=cookies, headers=HEADERS)
 
         # filename などがヘッダーから取得できないため、URLから名前を取得する
         original_file_extension: Path = Path(
@@ -170,7 +177,7 @@ def original_url_parse(download_dir_name: str, original_uri: str) -> None:
             original_uri) + original_file_extension
 
         # デフォルトのファイル名はUUIDのため、original_uriの末尾をファイル名とする
-        download_dir: Path = download_root_dir / fan_club_id / download_dir_name
+        download_dir: Path = download_root_dir / fan_club_id
 
         if not download_dir.is_dir():
             download_dir.mkdir(parents=True)
@@ -186,7 +193,7 @@ def original_url_parse(download_dir_name: str, original_uri: str) -> None:
 def posts_parse(posts_url: str) -> None:
     # 直接開くと動的ページとなるが、APIでJSONを呼び出し可能
     posts_api_url = FANTIA_API_ENDPOINT + posts_url
-    posts_response = requests.get(posts_api_url, cookies=cookies)
+    posts_response = requests.get(posts_api_url, cookies=cookies, headers=HEADERS)
 
     with FantiaPostsParser() as posts_parser:
         posts_parser.feed(posts_response.text)
@@ -205,7 +212,7 @@ def posts_parse(posts_url: str) -> None:
 def fan_clubs_page_parse(fan_clubs_url: str, page_number: int) -> None:
     fan_clubs_params = {'page': page_number}
     fan_clubs_response = requests.get(
-        fan_clubs_url, params=fan_clubs_params, cookies=cookies)
+        fan_clubs_url, params=fan_clubs_params, cookies=cookies, headers=HEADERS)
 
     with FantiaFanClubsParser() as fan_clubs_parser:
         fan_clubs_parser.feed(fan_clubs_response.text)
@@ -222,7 +229,7 @@ def fan_clubs_page_parse(fan_clubs_url: str, page_number: int) -> None:
 def fan_clubs_parse(fan_club_id: str) -> None:
     fan_clubs_url: str = urljoin(
         FANTIA_URL_PREFIX, f'/fanclubs/{fan_club_id}/posts')
-    fan_clubs_response = requests.get(fan_clubs_url, cookies=cookies)
+    fan_clubs_response = requests.get(fan_clubs_url, cookies=cookies, headers=HEADERS)
 
     with FantiaFanClubsParser() as fan_clubs_parser:
         fan_clubs_parser.feed(fan_clubs_response.text)
