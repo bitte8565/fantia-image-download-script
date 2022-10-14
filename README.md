@@ -2,6 +2,12 @@
 
 ファンティア(Fantia)のファンクラブに投稿された、画像ファイルを一括でダウンロードするPythonスクリプトです。
 
+## モード
+fantiaではダウンロードするコンテンツが画像とファイルに分かれている  
+どちらをダウンロードするか`fantia_image_download.ini`の`photo_flg`で設定する  
+画像の場合`True`  
+ファイルの場合`False`
+
 ## 動作検証済み環境
 
 * Python: 3.8.5
@@ -14,7 +20,7 @@
     * ブラウザクッキーの `_session_id` の値を、 `session_id=` の後ろに記述
     * ダウンロードしたいファンクラブのIDを、 `fan_club_id=` の後ろに記述
 1. `python fantia_image_download.py` を実行
-    * `fantia_image_download.ini` の `download_root_dir` で指定したディレクトリ配下に、 `<fan_club_id>/<posts_id>_<posted_date>_<posted_time>/` という名前で投稿ごとにディレクトリが作成され、その中に画像がダウンロードされます
+    * `fantia_image_download.ini` の `download_root_dir` で指定したディレクトリ配下に、 `<fan_club_id>`という名前でディレクトリが作成され、その中に画像がダウンロードされます
 
 ## 免責事項
 

@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
 
 import json
-import requests
+import os
+import shutil
 import sys
 import time
 import traceback
-
+import urllib
+import zipfile
 from configparser import ConfigParser
-from datetime import datetime
-from enum import Enum
-from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 from logging import basicConfig, getLogger, StreamHandler, INFO
 from pathlib import Path
-from typing import Dict, Iterable, List, Set
-from urllib.parse import urljoin, urlparse
-from urllib.request import build_opener, HTTPCookieProcessor
+from typing import Dict, List
+from urllib.parse import urljoin
+
+import requests
 
 # 定数宣言
 FANTIA_URL_PREFIX = 'https://fantia.jp/'
@@ -35,37 +35,36 @@ config: ConfigParser = ConfigParser()
 config.read(ini_file_path.absolute(), encoding='UTF-8')
 fantia_config = config['fantia']
 
+# config値
 cookies = {'_session_id': fantia_config['session_id'].strip()}
 fan_club_id: str = fantia_config['fan_club_id'].strip()
-download_interval_seconds: int = int(
-    fantia_config['download_interval_seconds'])
+download_interval_seconds: int = int(fantia_config['download_interval_seconds'])
+max_page: int = int(fantia_config['max_page'])
 download_root_dir_path: Path = Path(fantia_config['download_root_dir'])
+photo_flg = True if fantia_config['photo_flg'] == 'True' else False
+
+# パス
 download_root_dir: Path = download_root_dir_path if download_root_dir_path.is_absolute(
 ) else (script_file_path.parent / download_root_dir_path).absolute()
+fan_club_id_dir: Path = download_root_dir / fan_club_id
+zip_dir: Path = fan_club_id_dir / "zip"
+temp_dir: Path = fan_club_id_dir / "temp"
 
+# リクエスト
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_5) ' \
      'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36 '
 HEADERS = {'User-Agent': UA}
+download_list = []
 
-
-def get_attr_value_by_name(attrs: List[tuple], attr_name: str) -> str:
-    attr = tuple(filter(lambda attr: attr[0] == attr_name, attrs))
-    return attr[0][1] if attr else None
-
-
-def get_url_last_path(url: str) -> str:
-    return urlparse(url).path.split('/')[-1]
-
-
-def download_interval() -> None:
-    time.sleep(download_interval_seconds)
+# ダウンロード対象外拡張子
+denny_extensions = ('.psd', '.txt')
 
 
 class FantiaFanClubsParser(HTMLParser):
     def __init__(self):
         HTMLParser.__init__(self)
         self.posts_urls: List[str] = []
-        self.max_page_number: int = None
+        self.max_page_number: int = 0
 
     def __enter__(self):
         return self
@@ -92,56 +91,8 @@ class FantiaFanClubsParser(HTMLParser):
                             self.max_page_number = int(page_link_url.split('=')[1])
                             break
         except Exception:
+            # 2ページ目移行でエラーになるので暫定処置
             pass
-
-
-class FantiaPostsParser:
-    def __init__(self):
-        self.download_dir_name: str = None
-        self.original_uris: Set[str] = set()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
-
-    def feed(self, data: str):
-        '''
-        {
-            post: {
-                id: '<POST_ID>'
-                posted_at: 'Wed, 1 Jan 2020 9:00:00 +0900',
-                post_contents: [{
-                        post_content_photos: [{
-                                show_original_uri: '/posts/<POST_ID>/post_content_photo/<CONTENT_ID>'
-                        },]
-                },]
-            }
-        }
-        '''
-        posts: Dict[any] = json.loads(data)['post']
-
-        # download_dir_name
-        posted_at = datetime.strptime(posts['posted_at'], POSTED_AT_FORMAT)
-        self.download_dir_name = '{}_{}{:02d}{:02d}_{:02d}{:02d}{:02d}'.format(
-            posts['id'],
-            posted_at.year, posted_at.month, posted_at.day,
-            posted_at.hour, posted_at.minute, posted_at.second
-        )
-
-        # original_uri
-        post_contents: List[dict] = posts['post_contents']
-        for post_content in post_contents:
-            post_content_photos: List[dict] = post_content.get(
-                'post_content_photos')
-            if post_content_photos:
-                for post_content_photo in post_content_photos:
-                    self.original_uris.add(
-                        post_content_photo['show_original_uri'])
-
-    def close(self):
-        None
 
 
 class FantiaOriginalUriParser(HTMLParser):
@@ -160,53 +111,84 @@ class FantiaOriginalUriParser(HTMLParser):
             self.src = get_attr_value_by_name(attrs, 'src')
 
 
-def original_url_parse(download_dir_name: str, original_uri: str) -> None:
-    download_interval()
-    original_uri_response = requests.get(
-        urljoin(FANTIA_URL_PREFIX, original_uri), cookies=cookies, headers=HEADERS)
+def get_attr_value_by_name(attrs: List[tuple], attr_name: str) -> str:
+    attr = tuple(filter(lambda attr1: attr1[0] == attr_name, attrs))
+    return attr[0][1] if attr else None
 
-    with FantiaOriginalUriParser() as original_uri_parser:
-        original_uri_parser.feed(original_uri_response.text)
-        original_uri_response = requests.get(
-            original_uri_parser.src, cookies=cookies, headers=HEADERS)
 
-        # filename などがヘッダーから取得できないため、URLから名前を取得する
-        original_file_extension: Path = Path(
-            get_url_last_path(original_uri_parser.src)).suffix
-        download_file_name: str = get_url_last_path(
-            original_uri) + original_file_extension
+def download_interval() -> None:
+    time.sleep(download_interval_seconds)
 
-        # デフォルトのファイル名はUUIDのため、original_uriの末尾をファイル名とする
-        download_dir: Path = download_root_dir / fan_club_id
 
-        if not download_dir.is_dir():
-            download_dir.mkdir(parents=True)
+def get_uri(data):
+    posts: Dict[any] = json.loads(data)['post']
 
-        download_file_path: str = str(download_dir / download_file_name)
+    post_contents: List[dict] = posts['post_contents']
+    for post_content in post_contents:
 
-        with open(download_file_path, 'wb') as download_file:
-            download_file.write(original_uri_response.content)
-            logger.info(
-                f'image [{original_uri}] download to [{download_file_path}].')
+        if photo_flg:
+            # 画像uri
+            post_content_photos = post_content.get('post_content_photos')
+            if post_content_photos:
+                for post_content_photo in post_content_photos:
+                    original_uri_response = requests.get(
+                        urljoin(FANTIA_URL_PREFIX, post_content_photo['show_original_uri'])
+                        , cookies=cookies, headers=HEADERS)
+                    with FantiaOriginalUriParser() as original_uri_parser:
+                        original_uri_parser.feed(original_uri_response.text)
+
+                    content = {'uri': original_uri_parser.src, 'photo_flg': True}
+                    download_list.append(content)
+        else:
+            # ファイルuri
+            download_uri = post_content.get('download_uri')
+            filename = post_content.get('filename')
+            if download_uri and filename:
+                path, ext = os.path.splitext(os.path.basename(filename))
+                content = {'uri': download_uri, 'filename': filename, 'extension': ext, 'photo_flg': False}
+                download_list.append(content)
 
 
 def posts_parse(posts_url: str) -> None:
     # 直接開くと動的ページとなるが、APIでJSONを呼び出し可能
     posts_api_url = FANTIA_API_ENDPOINT + posts_url
     posts_response = requests.get(posts_api_url, cookies=cookies, headers=HEADERS)
+    get_uri(posts_response.text)
 
-    with FantiaPostsParser() as posts_parser:
-        posts_parser.feed(posts_response.text)
-        original_uris = posts_parser.original_uris
 
-        if original_uris:
-            original_uri_count = len(original_uris)
-            download_dir_name = posts_parser.download_dir_name
+def download_content(content):
+    if photo_flg:
+        parse_result = urllib.parse.urlparse(content['uri'])
+        file_name = str(parse_result.path.split('/')[-1])
+        download_file_path = str(fan_club_id_dir / file_name)
 
-            for i, original_uri in enumerate(original_uris, 1):
-                original_url_parse(download_dir_name, original_uri)
+        # ダウンロード
+        response = requests.get(content['uri'], cookies=cookies, headers=HEADERS)
+
+    else:
+        ext = content['extension']
+        post_number = content['uri'].split('/')[2]
+        file_number = content['uri'].split('/')[4]
+
+        if ext.endswith(denny_extensions):
+            return
+
+        # ダウンロード
+        response = requests.get(
+            urljoin(FANTIA_URL_PREFIX, content['uri']), cookies=cookies, headers=HEADERS)
+
+        if ext == '.zip':
+            file_name = f'{post_number}_{file_number}{ext}'
+            download_file_path = str(zip_dir / file_name)
         else:
-            logger.info(f'original uri empty. posts url [posts_url] ')
+            content_name = content['filename']
+            file_name = f'{post_number}_{file_number}_{content_name}'
+            download_file_path = str(fan_club_id_dir / file_name)
+
+    # ファイルに書き込み
+    with open(download_file_path, 'wb') as download_file:
+        download_file.write(response.content)
+        logger.info(f'download {download_file_path}')
 
 
 def fan_clubs_page_parse(fan_clubs_url: str, page_number: int) -> None:
@@ -221,20 +203,26 @@ def fan_clubs_page_parse(fan_clubs_url: str, page_number: int) -> None:
 
         for i, posts_url in enumerate(posts_urls, 1):
             log_message = f'post {i}/{posts_count}: [{posts_url}] parse '
-            logger.info(log_message + 'start.')
             posts_parse(posts_url)
             logger.info(log_message + 'end.')
 
 
-def fan_clubs_parse(fan_club_id: str) -> None:
+def fan_clubs_parse() -> None:
+    # ファンクラブトップページを解析
     fan_clubs_url: str = urljoin(
         FANTIA_URL_PREFIX, f'/fanclubs/{fan_club_id}/posts')
     fan_clubs_response = requests.get(fan_clubs_url, cookies=cookies, headers=HEADERS)
 
+    # 最終ページ取得
     with FantiaFanClubsParser() as fan_clubs_parser:
         fan_clubs_parser.feed(fan_clubs_response.text)
         max_page_number = fan_clubs_parser.max_page_number
 
+    # ダウンロードするページ数を設定
+    if max_page > 0:
+        max_page_number = max_page
+
+    # 各ページからダウンロードuriを取得
     for i in range(max_page_number):
         page_number = i + 1
         log_message = f'page {page_number}/{max_page_number} parse '
@@ -243,10 +231,65 @@ def fan_clubs_parse(fan_club_id: str) -> None:
         logger.info(log_message + 'end.')
 
 
+def download():
+    if not zip_dir.is_dir():
+        zip_dir.mkdir(parents=True)
+    if not temp_dir.is_dir():
+        temp_dir.mkdir(parents=True)
+    for content in download_list:
+        download_interval()
+        download_content(content)
+
+
+def zip_open():
+    zip_list = os.listdir(path=zip_dir)
+    for zip_file in zip_list:
+        zip_file_full_path = str(zip_dir / str(zip_file))
+        open_dir = str(temp_dir / os.path.splitext(os.path.basename(str(zip_file)))[0])
+        try:
+            with zipfile.ZipFile(zip_file_full_path) as z:
+                for info in z.infolist():
+                    info.filename = info.orig_filename.encode('cp437').decode('cp932')
+                    if os.sep != "/" and os.sep in info.filename:
+                        info.filename = info.filename.replace(os.sep, "/")
+                    if info.filename.endswith(denny_extensions):
+                        continue
+                    z.extract(info, open_dir)
+        except zipfile.BadZipFile:
+            pass
+
+
+def move_file():
+    for root, dirs, files in os.walk(top=str(temp_dir)):
+        for file in files:
+            file_path = os.path.join(root, file)
+            tmp = file_path.split('\\')
+            zip_file_name = ''
+            for i in range(len(tmp)):
+                if tmp[i] == 'temp':
+                    zip_file_name = tmp[i + 1]
+                    break
+            shutil.move(file_path, fan_club_id_dir / f'{zip_file_name}_{file}')
+
+
+def delete_dir():
+    shutil.rmtree(str(zip_dir))
+    shutil.rmtree(str(temp_dir))
+
+
 def main():
     log_message = f'fan club [{fan_club_id}] parse '
     logger.info(log_message + 'start.')
-    fan_clubs_parse(fan_club_id)
+    # サイト解析
+    fan_clubs_parse()
+    # ダウンロード
+    download()
+    # 解凍
+    zip_open()
+    # ファイル移動
+    move_file()
+    # 不要ファイル削除
+    delete_dir()
     logger.info(log_message + 'end.')
 
 
